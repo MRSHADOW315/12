@@ -34,6 +34,7 @@ import com.example.data.model.ReportReason
 import com.example.data.model.ReportStatus
 import com.example.data.model.ReportTargetType
 import com.example.data.model.StoryVisibility
+import com.example.service.firebase.FirebaseManager
 import com.example.service.privacy.EffectiveLocation
 import com.example.service.privacy.PrivacyAuthorizationEngine
 import kotlinx.coroutines.CoroutineScope
@@ -67,37 +68,63 @@ class KinSphereRepository(private val database: KinSphereDatabase) {
     private val appUpdateDao = database.appUpdateDao()
     private val broadcastChannelDao = database.broadcastChannelDao()
 
-    private val _currentUserId = MutableStateFlow("user_ahmed")
+    private val _currentUserId = MutableStateFlow(FirebaseManager.currentUid ?: "user_default")
     val currentUserId: StateFlow<String> = _currentUserId.asStateFlow()
 
     init {
         CoroutineScope(Dispatchers.IO).launch {
             seedDatabaseIfEmpty()
+            // Observe Firebase auth changes
+            FirebaseManager.currentUser.collect { fbUser ->
+                if (fbUser != null) {
+                    _currentUserId.value = fbUser.uid
+                    syncCurrentUserWithFirebase(fbUser.uid, fbUser.displayName ?: "", fbUser.email ?: "")
+                }
+            }
         }
     }
 
     suspend fun seedDatabaseIfEmpty() {
-        val existing = userDao.getUserByIdOnce("user_ahmed")
+        val uid = _currentUserId.value
+        val existing = userDao.getUserByIdOnce(uid)
         if (existing == null) {
-            for (u in SeedData.users) userDao.insertUser(u)
-            for (lp in SeedData.locationPermissions) locationDao.insertLocationPermission(lp)
-            for (r in SeedData.relationships) relationshipDao.insertRelationship(r)
-            for (f in SeedData.friendships) friendshipDao.insertFriendship(f)
-            for (fol in SeedData.follows) followDao.insertFollow(fol)
-            for (c in SeedData.conversations) chatDao.insertConversation(c)
-            for (m in SeedData.conversationMembers) chatDao.insertMember(m)
-            for (msg in SeedData.messages) chatDao.insertMessage(msg)
-            for (st in SeedData.stories) storyDao.insertStory(st)
-            for (n in SeedData.notifications) notificationDao.insertNotification(n)
-            for (evt in SeedData.communityEvents) communityEventDao.insertEvent(evt)
-            for (rep in SeedData.reports) reportDao.insertReport(rep)
-            for (str in SeedData.streaks) streakDao.insertStreak(str)
-            for (live in SeedData.liveStreams) liveStreamDao.insertLiveStream(live)
-            for (short in SeedData.shortVideos) shortVideoDao.insertShortVideo(short)
-            for (comm in SeedData.shortComments) shortVideoDao.insertComment(comm)
-            for (br in SeedData.beRealPosts) beRealDao.insertPost(br)
-            for (upd in SeedData.appUpdates) appUpdateDao.insertUpdate(upd)
-            for (chan in SeedData.broadcastChannels) broadcastChannelDao.insertChannel(chan)
+            val starterUser = UserEntity(
+                id = uid,
+                username = "my_profile",
+                displayName = "My Profile",
+                email = "",
+                bio = "Set your bio in profile settings",
+                country = "",
+                city = ""
+            )
+            userDao.insertUser(starterUser)
+            locationDao.insertLocationPermission(
+                LocationPermissionEntity(
+                    userId = uid,
+                    visibility = LocationVisibility.NOBODY,
+                    precision = PrecisionLevel.APPROXIMATE
+                )
+            )
+        }
+    }
+
+    private suspend fun syncCurrentUserWithFirebase(uid: String, displayName: String, email: String) {
+        val existing = userDao.getUserByIdOnce(uid)
+        if (existing == null) {
+            val newUser = UserEntity(
+                id = uid,
+                username = email.substringBefore("@").ifBlank { "user_${uid.take(5)}" },
+                displayName = displayName.ifBlank { "KinSphere User" },
+                email = email
+            )
+            userDao.insertUser(newUser)
+            locationDao.insertLocationPermission(
+                LocationPermissionEntity(
+                    userId = uid,
+                    visibility = LocationVisibility.FRIENDS,
+                    precision = PrecisionLevel.EXACT
+                )
+            )
         }
     }
 
@@ -120,17 +147,68 @@ class KinSphereRepository(private val database: KinSphereDatabase) {
         interests: String,
         languages: String
     ) {
-        val user = userDao.getUserByIdOnce(_currentUserId.value) ?: return
-        userDao.updateUser(
-            user.copy(
-                displayName = displayName,
-                bio = bio,
-                country = country,
-                city = city,
-                interests = interests,
-                languages = languages
-            )
+        val uid = _currentUserId.value
+        val user = userDao.getUserByIdOnce(uid) ?: return
+        val updated = user.copy(
+            displayName = displayName,
+            bio = bio,
+            country = country,
+            city = city,
+            interests = interests,
+            languages = languages
         )
+        userDao.updateUser(updated)
+        // Sync to cloud Firestore
+        FirebaseManager.saveUserProfile(
+            uid = uid,
+            displayName = displayName,
+            bio = bio,
+            interests = interests,
+            city = city,
+            country = country,
+            avatarUrl = user.avatarUrl
+        )
+    }
+
+    suspend fun updateAvatarUrl(avatarUrl: String) {
+        val uid = _currentUserId.value
+        val user = userDao.getUserByIdOnce(uid) ?: return
+        val updated = user.copy(avatarUrl = avatarUrl)
+        userDao.updateUser(updated)
+        FirebaseManager.saveUserProfile(
+            uid = uid,
+            displayName = user.displayName,
+            bio = user.bio,
+            interests = user.interests,
+            city = user.city,
+            country = user.country,
+            avatarUrl = avatarUrl
+        )
+    }
+
+    suspend fun refreshUsersFromCloud(): List<UserEntity> {
+        val cloudProfiles = FirebaseManager.fetchAllUsers()
+        val myId = _currentUserId.value
+        val result = mutableListOf<UserEntity>()
+        for (profile in cloudProfiles) {
+            if (profile.id != myId) {
+                userDao.insertUser(profile)
+                result.add(profile)
+            }
+        }
+        return result
+    }
+
+    suspend fun sendCloudLike(targetUserId: String, isSuperLike: Boolean = false): Result<Boolean> {
+        val myId = _currentUserId.value
+        val res = FirebaseManager.sendLike(myId, targetUserId, isSuperLike)
+        res.onSuccess { isMutualMatch ->
+            if (isMutualMatch) {
+                // Form an active relationship in Room
+                requestRelationship(targetUserId, RelationshipType.ROMANTIC)
+            }
+        }
+        return res
     }
 
     suspend fun registerUser(
@@ -344,6 +422,22 @@ class KinSphereRepository(private val database: KinSphereDatabase) {
         return Result.success(Unit)
     }
 
+    // --- DATING LIKES, PASSES & MATCHES (REAL BACKEND INTEGRATION) ---
+    suspend fun sendLike(targetUserId: String): Result<Boolean> {
+        val myId = _currentUserId.value
+        val res = FirebaseManager.sendLike(myId, targetUserId)
+        if (res.isSuccess && res.getOrNull() == true) {
+            // It's a mutual match! Automatically establish a Romantic / Mutual Connection
+            requestRelationship(targetUserId, RelationshipType.ROMANTIC)
+        }
+        return res
+    }
+
+    suspend fun sendPass(targetUserId: String): Result<Unit> {
+        val myId = _currentUserId.value
+        return FirebaseManager.sendPass(myId, targetUserId)
+    }
+
     // --- FRIENDSHIPS & FOLLOWS ---
     fun getActiveFriends(userId: String): Flow<List<FriendshipEntity>> = friendshipDao.getActiveFriendships(userId)
 
@@ -417,10 +511,21 @@ class KinSphereRepository(private val database: KinSphereDatabase) {
             time = System.currentTimeMillis()
         )
 
-        // Automatically update streak if 1-on-1 direct conversation
         val memberIds = chatDao.getConversationMemberIds(conversationId)
-        val otherMemberId = memberIds.find { it != myId }
-        if (otherMemberId != null && memberIds.size == 2) {
+        val otherMemberId = memberIds.find { it != myId } ?: ""
+
+        // Forward to real Firestore
+        FirebaseManager.sendMessage(
+            conversationId = conversationId,
+            senderId = myId,
+            receiverId = otherMemberId,
+            text = text,
+            mediaUrl = mediaUrl,
+            type = mediaType
+        )
+
+        // Automatically update streak if 1-on-1 direct conversation
+        if (otherMemberId.isNotEmpty() && memberIds.size == 2) {
             recordStreakInteraction(otherMemberId)
         }
     }

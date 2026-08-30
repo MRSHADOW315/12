@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // User profile pictures and avatar media
+    match /avatars/{userId}/{fileName} {
+      allow read: if true; // Publicly readable for app profiles
+      allow write: if isAuthenticated() && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024 // Max 10MB
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Chat and media message attachments
+    match /messages/{conversationId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated()
+                   && request.resource.size < 25 * 1024 * 1024; // Max 25MB
+    }
+
+    // Stories, Reels, and BeReal media
+    match /posts/{userId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == userId
+                   && request.resource.size < 50 * 1024 * 1024; // Max 50MB
+    }
+  }
+}

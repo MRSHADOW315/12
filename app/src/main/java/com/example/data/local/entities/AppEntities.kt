@@ -28,7 +28,7 @@ data class UserEntity(
     val username: String,
     val displayName: String,
     val email: String,
-    val passwordHash: String,
+    val passwordHash: String = "",
     val avatarUrl: String = "",
     val coverUrl: String = "",
     val bio: String = "",
@@ -39,9 +39,11 @@ data class UserEntity(
     val interests: String = "Travel, Photography, Tech",
     val languages: String = "English, French",
     val isGhostMode: Boolean = false,
+    val isVerified: Boolean = false,
     val role: UserRole = UserRole.USER,
     val isSuspended: Boolean = false,
     val isBanned: Boolean = false,
+    val lastActiveAt: Long = System.currentTimeMillis(),
     val createdAt: Long = System.currentTimeMillis()
 )
 

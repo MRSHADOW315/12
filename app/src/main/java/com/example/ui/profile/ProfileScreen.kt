@@ -182,7 +182,7 @@ fun ProfileScreen(
                 }
             }
 
-            // Persona Switcher Bar (Instant Testing Tool)
+            // Real User Account & Cloud Sync Controls
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
@@ -192,35 +192,27 @@ fun ProfileScreen(
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.SwitchAccount, contentDescription = null, tint = PrimaryLight, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.Security, contentDescription = null, tint = PrimaryLight, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Switch Test Persona", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Real User Network & Sync", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        LazyRow(
+                        Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            items(allUsers) { u ->
-                                val isCurrent = u.id == currentUserId
-                                Surface(
-                                    color = if (isCurrent) PrimaryNeon else DarkSurface,
-                                    shape = RoundedCornerShape(12.dp),
-                                    border = if (isCurrent) null else androidx.compose.foundation.BorderStroke(1.dp, DarkSurfaceBorder),
-                                    modifier = Modifier
-                                        .clickable { repository.switchCurrentUser(u.id) }
-                                        .testTag("switch_persona_${u.username}")
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                    ) {
-                                        Text(u.displayName.split(" ").first(), color = if (isCurrent) Color.White else TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("(${u.countryCode})", color = if (isCurrent) Color.White.copy(alpha = 0.8f) else TextSecondary, fontSize = 10.sp)
+                            Button(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        repository.refreshUsersFromCloud()
                                     }
-                                }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeon),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f).testTag("sync_cloud_users_btn")
+                            ) {
+                                Text("Sync Real Users", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }

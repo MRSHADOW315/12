@@ -118,19 +118,9 @@ fun KinSphereMainScreen(
 
     if (isCameraStudioOpen) {
         CameraStudioScreen(
-            repository = repository,
             onClose = { isCameraStudioOpen = false },
-            onNavigateToStory = {
+            onMediaUploaded = { uploadedUrl ->
                 isCameraStudioOpen = false
-                currentTab = NavTab.Stories
-            },
-            onNavigateToShorts = {
-                isCameraStudioOpen = false
-                currentTab = NavTab.Reels
-            },
-            onNavigateToBeReal = {
-                isCameraStudioOpen = false
-                currentTab = NavTab.BeReal
             }
         )
     } else if (activeFullscreenLiveStream != null) {
