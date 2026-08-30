@@ -2,6 +2,7 @@
   "name": "METOU",
   "description": "METOU (Me to You) – The ultimate all-in-one super platform combining global interactive maps, Amazon & METOU shopping, Uber on-demand rides, gourmet food delivery, real-time 0.0000001/s coin mining rig, live broadcasts, TikTok reels, YouTube video channels, Netflix-style cinema, and Gemini AI Genius.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
-
