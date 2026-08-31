@@ -4,18 +4,26 @@ import android.app.Activity
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import com.example.BuildConfig
 import com.example.data.local.entities.MessageEntity
 import com.example.data.local.entities.UserEntity
 import com.example.data.model.MessageType
 import com.example.data.model.UserRole
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseException
+import com.google.firebase.FirebaseOptions
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
+import com.google.firebase.auth.FirebaseAuthInvalidUserException
+import com.google.firebase.auth.FirebaseAuthUserCollisionException
+import com.google.firebase.auth.FirebaseAuthWeakPasswordException
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.PhoneAuthCredential
 import com.google.firebase.auth.PhoneAuthOptions
 import com.google.firebase.auth.PhoneAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
@@ -45,12 +53,22 @@ import java.util.concurrent.TimeUnit
  */
 object FirebaseManager {
     private const val TAG = "FirebaseManager"
+    private const val REQUIRED_PROJECT_ID = "omniverse-tqs6o"
     private const val AUTH_DOMAIN_SUFFIX = "@kinsphere.auth"
 
     private val RESERVED_USERNAMES = setOf(
         "admin", "administrator", "system", "kinsphere", "support",
         "moderator", "root", "official", "help", "security", "staff"
     )
+
+    sealed interface FirebaseConfigStatus {
+        data class Configured(val projectId: String) : FirebaseConfigStatus
+        data class MissingConfiguration(
+            val reason: String,
+            val applicationId: String = "com.shadow.metou"
+        ) : FirebaseConfigStatus
+        data class Error(val message: String) : FirebaseConfigStatus
+    }
 
     private var authInstance: FirebaseAuth? = null
     private var firestoreInstance: FirebaseFirestore? = null
@@ -62,27 +80,100 @@ object FirebaseManager {
     private val _isFirebaseAvailable = MutableStateFlow(false)
     val isFirebaseAvailable: StateFlow<Boolean> = _isFirebaseAvailable.asStateFlow()
 
+    private val _configStatus = MutableStateFlow<FirebaseConfigStatus>(
+        FirebaseConfigStatus.MissingConfiguration("Initializing Firebase...")
+    )
+    val configStatus: StateFlow<FirebaseConfigStatus> = _configStatus.asStateFlow()
+
     val currentUid: String?
         get() = authInstance?.currentUser?.uid ?: _currentUser.value?.uid
 
     fun initialize(context: Context) {
         try {
-            if (FirebaseApp.getApps(context).isEmpty()) {
-                FirebaseApp.initializeApp(context)
+            val app: FirebaseApp = if (FirebaseApp.getApps(context).isEmpty()) {
+                var initializedApp: FirebaseApp? = null
+                try {
+                    initializedApp = FirebaseApp.initializeApp(context)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Default initializeApp without options failed: ${e.message}")
+                }
+
+                if (initializedApp == null) {
+                    // Check if programmatic FirebaseOptions are provided via BuildConfig / Environment
+                    val apiKey = runCatching { BuildConfig.FIREBASE_API_KEY }.getOrNull()?.takeIf { it.isNotBlank() && !it.startsWith("DEFAULT_") }
+                    val appId = runCatching { BuildConfig.FIREBASE_APPLICATION_ID }.getOrNull()?.takeIf { it.isNotBlank() && !it.startsWith("DEFAULT_") }
+                    val projectId = runCatching { BuildConfig.FIREBASE_PROJECT_ID }.getOrNull()?.takeIf { it.isNotBlank() && !it.startsWith("DEFAULT_") }
+                    val storageBucket = runCatching { BuildConfig.FIREBASE_STORAGE_BUCKET }.getOrNull()?.takeIf { it.isNotBlank() && !it.startsWith("DEFAULT_") }
+
+                    if (!apiKey.isNullOrBlank() && !appId.isNullOrBlank() && !projectId.isNullOrBlank()) {
+                        val builder = FirebaseOptions.Builder()
+                            .setApiKey(apiKey)
+                            .setApplicationId(appId)
+                            .setProjectId(projectId)
+                        if (!storageBucket.isNullOrBlank()) {
+                            builder.setStorageBucket(storageBucket)
+                        }
+                        initializedApp = FirebaseApp.initializeApp(context, builder.build())
+                    }
+                }
+
+                if (initializedApp == null && FirebaseApp.getApps(context).isEmpty()) {
+                    _isFirebaseAvailable.value = false
+                    _configStatus.value = FirebaseConfigStatus.MissingConfiguration(
+                        "google-services.json is missing in /app/ and Firebase API credentials are not set in .env."
+                    )
+                    return
+                }
+                initializedApp ?: FirebaseApp.getInstance()
+            } else {
+                FirebaseApp.getInstance()
             }
-            authInstance = FirebaseAuth.getInstance()
-            firestoreInstance = FirebaseFirestore.getInstance()
-            storageInstance = FirebaseStorage.getInstance()
+
+            val activeProjectId = app.options.projectId ?: REQUIRED_PROJECT_ID
+            authInstance = FirebaseAuth.getInstance(app)
+            firestoreInstance = FirebaseFirestore.getInstance(app)
+            storageInstance = FirebaseStorage.getInstance(app)
 
             authInstance?.addAuthStateListener { auth ->
                 _currentUser.value = auth.currentUser
             }
             _currentUser.value = authInstance?.currentUser
             _isFirebaseAvailable.value = true
-            Log.d(TAG, "Firebase initialized successfully. Active UID: $currentUid")
+            _configStatus.value = FirebaseConfigStatus.Configured(activeProjectId)
+            Log.d(TAG, "Firebase initialized for project: '$activeProjectId'. Active UID: $currentUid")
         } catch (e: Exception) {
             Log.w(TAG, "Firebase initialization warning: ${e.message}")
             _isFirebaseAvailable.value = false
+            _configStatus.value = FirebaseConfigStatus.Error(e.message ?: "Firebase initialization error")
+        }
+    }
+
+    /**
+     * Formats Firebase exceptions into clear, actionable error descriptions including exact error codes.
+     */
+    fun formatFirebaseError(e: Throwable): String {
+        return when (e) {
+            is FirebaseAuthUserCollisionException -> {
+                "The username is already taken. Please choose another username. [${e.errorCode}]"
+            }
+            is FirebaseAuthWeakPasswordException -> {
+                "Password is too weak: ${e.reason ?: "Please use at least 6 characters."} [${e.errorCode}]"
+            }
+            is FirebaseAuthInvalidCredentialsException -> {
+                "Invalid credentials provided. Check your username and password. [${e.errorCode}]"
+            }
+            is FirebaseAuthInvalidUserException -> {
+                "No active account found for this username. [${e.errorCode}]"
+            }
+            is FirebaseAuthException -> {
+                "${e.message ?: "Authentication error"} [${e.errorCode}]"
+            }
+            is FirebaseFirestoreException -> {
+                "Firestore error: ${e.message ?: e.localizedMessage} [${e.code}]"
+            }
+            else -> {
+                e.message ?: e.localizedMessage ?: "Unexpected error (${e.javaClass.simpleName})"
+            }
         }
     }
 
@@ -111,7 +202,11 @@ object FirebaseManager {
 
     /**
      * Creates a permanent Firebase Account using Username + Password/PIN.
-     * Uses an atomic Firestore transaction to guarantee that usernames are globally unique and case-insensitive.
+     * 
+     * CRITICAL AUTHENTICATION SEQUENCE:
+     * 1. Completes Firebase Authentication FIRST (creates user & sets request.auth != null).
+     * 2. Only AFTER authentication succeeds, writes the user profile and username index to Firestore.
+     * 3. This ensures Firestore security rules (`allow read, write: if request.auth != null;`) are fully satisfied.
      */
     suspend fun registerWithUsername(
         rawUsername: String,
@@ -132,32 +227,28 @@ object FirebaseManager {
             return Result.failure(IllegalArgumentException("Password/PIN must be at least 6 characters."))
         }
 
-        val usernameDocRef = firestore.collection("usernames").document(normalizedUsername)
+        val authEmail = "$normalizedUsername$AUTH_DOMAIN_SUFFIX"
 
         return try {
-            // Step 1: Atomic Check via Transaction to ensure username is available
-            val usernameAvailable = firestore.runTransaction { transaction ->
-                val snapshot = transaction.get(usernameDocRef)
-                if (snapshot.exists()) {
-                    throw IllegalStateException("The username '$rawUsername' is already taken.")
+            // Step 1: Complete Firebase Authentication FIRST (Authenticates session before Firestore writes)
+            val authResult = try {
+                auth.createUserWithEmailAndPassword(authEmail, passwordOrPin).await()
+            } catch (e: Exception) {
+                if (e is FirebaseAuthUserCollisionException) {
+                    return Result.failure(IllegalStateException("The username '$rawUsername' is already taken. [${e.errorCode}]"))
                 }
-                true
-            }.await()
-
-            if (!usernameAvailable) {
-                return Result.failure(IllegalStateException("Username already taken."))
+                return Result.failure(IllegalStateException(formatFirebaseError(e), e))
             }
 
-            // Step 2: Create Firebase Auth account
-            val authEmail = "$normalizedUsername$AUTH_DOMAIN_SUFFIX"
-            val authResult = auth.createUserWithEmailAndPassword(authEmail, passwordOrPin).await()
-            val firebaseUser = authResult.user ?: return Result.failure(IllegalStateException("Account creation failed."))
+            val firebaseUser = authResult.user ?: return Result.failure(IllegalStateException("Account creation returned null user."))
             val uid = firebaseUser.uid
+            _currentUser.value = firebaseUser
 
-            // Step 3: Atomic write mapping username -> UID and creating user profile in Firestore
+            // Step 2: Now that request.auth != null, write username claim & user profile to Firestore
             val batch = firestore.batch()
 
             // Save username claim
+            val usernameDocRef = firestore.collection("usernames").document(normalizedUsername)
             val usernameClaim = hashMapOf(
                 "uid" to uid,
                 "username" to rawUsername.trim(),
@@ -193,18 +284,23 @@ object FirebaseManager {
             val userDocRef = firestore.collection("users").document(uid)
             batch.set(userDocRef, userProfile)
 
-            batch.commit().await()
+            try {
+                batch.commit().await()
+                Log.d(TAG, "Profile saved to Firestore for user: $uid")
+            } catch (fsEx: Exception) {
+                Log.e(TAG, "Firestore profile creation warning: ${fsEx.message}", fsEx)
+            }
 
-            _currentUser.value = firebaseUser
             Result.success(firebaseUser)
         } catch (e: Exception) {
             Log.e(TAG, "registerWithUsername error: ${e.message}", e)
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 
     /**
      * Signs in an existing account using Username + Password/PIN.
+     * Completes Firebase Authentication FIRST, then updates lastActiveAt in Firestore.
      */
     suspend fun loginWithUsername(
         rawUsername: String,
@@ -223,16 +319,21 @@ object FirebaseManager {
             val user = result.user ?: return Result.failure(IllegalStateException("Authentication returned null user."))
             _currentUser.value = user
 
-            // Update lastActiveAt in Firestore
-            firestoreInstance?.collection("users")?.document(user.uid)?.set(
-                mapOf("lastActiveAt" to System.currentTimeMillis()),
-                SetOptions.merge()
-            )?.await()
+            // Update lastActiveAt in Firestore - since user is now authenticated, request.auth != null
+            try {
+                firestoreInstance?.collection("users")?.document(user.uid)?.set(
+                    mapOf("lastActiveAt" to System.currentTimeMillis()),
+                    SetOptions.merge()
+                )?.await()
+            } catch (fsEx: Exception) {
+                Log.w(TAG, "Could not update lastActiveAt timestamp: ${fsEx.message}")
+            }
 
             Result.success(user)
         } catch (e: Exception) {
-            Log.e(TAG, "loginWithUsername error: ${e.message}")
-            Result.failure(Exception("Invalid username or password/PIN."))
+            Log.e(TAG, "loginWithUsername error: ${e.message}", e)
+            val errorMsg = formatFirebaseError(e)
+            Result.failure(Exception(errorMsg, e))
         }
     }
 
@@ -319,6 +420,24 @@ object FirebaseManager {
     }
 
     /**
+     * Sends a password reset email using Firebase Authentication directly.
+     */
+    suspend fun sendPasswordReset(rawUsername: String): Result<Unit> {
+        val auth = authInstance ?: return Result.failure(IllegalStateException("Firebase Auth is not available."))
+        val validationResult = validateUsername(rawUsername)
+        if (validationResult.isFailure) return Result.failure(validationResult.exceptionOrNull()!!)
+        val normalizedUsername = validationResult.getOrThrow()
+        val authEmail = "$normalizedUsername$AUTH_DOMAIN_SUFFIX"
+
+        return try {
+            auth.sendPasswordResetEmail(authEmail).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(Exception(formatFirebaseError(e), e))
+        }
+    }
+
+    /**
      * Checks if an account exists by username and retrieves its recovery phone status.
      */
     suspend fun checkAccountRecoveryStatus(rawUsername: String): Result<Pair<String, String?>> {
@@ -343,7 +462,7 @@ object FirebaseManager {
                 Result.success(Pair(uid, phone))
             }
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 
@@ -365,7 +484,7 @@ object FirebaseManager {
             user.updatePassword(newPasswordOrPin).await()
             Result.success(Unit)
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 
@@ -399,7 +518,7 @@ object FirebaseManager {
             )
             Result.success(user)
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 
@@ -425,7 +544,7 @@ object FirebaseManager {
             firestore.collection("users").document(user.id).set(map, SetOptions.merge()).await()
             Result.success(Unit)
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 
@@ -453,7 +572,7 @@ object FirebaseManager {
             firestore.collection("users").document(uid).set(map, SetOptions.merge()).await()
             Result.success(Unit)
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(formatFirebaseError(e), e))
         }
     }
 

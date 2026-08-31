@@ -43,6 +43,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -111,6 +112,9 @@ fun AuthScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var infoMessage by remember { mutableStateOf<String?>(null) }
 
+    val configStatus by FirebaseManager.configStatus.collectAsState()
+    val isFirebaseAvailable by FirebaseManager.isFirebaseAvailable.collectAsState()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -137,8 +141,42 @@ fun AuthScreen(
                 text = "Real Connections • Real Profiles • Live Network",
                 fontSize = 13.sp,
                 color = TextMuted,
-                modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
+                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
             )
+
+            // Firebase Configuration Banner if not configured
+            if (configStatus !is FirebaseManager.FirebaseConfigStatus.Configured) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF24180A)),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE5A00D))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "⚡ Real Firebase Auth Connection Required",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFFACC15),
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "The app is wired to real Firebase Authentication. To authenticate live users:",
+                            color = TextPrimary,
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "1. Firebase project: omniverse-tqs6o\n   Package: com.shadow.metou\n2. Enable Email/Password & Phone in Firebase Authentication\n3. Enable Cloud Firestore & Storage in Firebase Console",
+                            color = TextMuted,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            }
 
             // Auth Card
             Card(
@@ -374,7 +412,7 @@ fun AuthScreen(
                                 Text("Recover Account", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 18.sp)
                             }
                             Text(
-                                "Enter your username to verify linked recovery methods.",
+                                "Enter your username to recover access to your account.",
                                 color = TextMuted,
                                 fontSize = 13.sp,
                                 modifier = Modifier.padding(vertical = 8.dp)
@@ -395,6 +433,34 @@ fun AuthScreen(
                                 ),
                                 shape = RoundedCornerShape(12.dp)
                             )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            TextButton(
+                                onClick = {
+                                    if (username.isBlank()) {
+                                        errorMessage = "Please enter your username first."
+                                        return@TextButton
+                                    }
+                                    coroutineScope.launch {
+                                        isLoading = true
+                                        val resetRes = FirebaseManager.sendPasswordReset(username)
+                                        resetRes.fold(
+                                            onSuccess = {
+                                                infoMessage = "Password reset email sent to account credentials."
+                                                errorMessage = null
+                                            },
+                                            onFailure = { ex ->
+                                                errorMessage = ex.localizedMessage ?: "Failed to send reset link."
+                                            }
+                                        )
+                                        isLoading = false
+                                    }
+                                },
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text("Send Password Reset Email", color = PrimaryNeon, fontSize = 12.sp)
+                            }
                         }
 
                         AuthMode.FORGOT_PASSWORD_OTP -> {
